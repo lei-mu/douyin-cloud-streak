@@ -1109,6 +1109,24 @@ def _b_channel_daily(account_id: str | None = None) -> tuple[str, int]:
     return today, int(rec.get("count", 0) or 0)
 
 
+def _route_send_channel(entry: dict) -> str:
+    """发送通道路由（run_send 与 compute_pending 共用，保证预测与实发一致）。
+
+    - has_conversation=True → 通道 A（consumer 正常私信）
+    - channel="creator" 且无会话 → 通道 B（首条消息，受「允许首条消息」开关与每日限额约束）
+    - 其余（channel="none"：手动添加、config.friends 迁移等）→ 通道 A：
+      按正常私信发送，聊天列表/搜索定位成功即发；定位失败如实报 failed。
+      修复：手动新增好友勾选保存后，曾因 has_conversation=False 被误判
+      "无会话"分流通道 B，在未开启「允许首条消息」时被静默 skipped，
+      表现为"保存了也不发"。none 来源意图明确（用户点名要发），必须走 A。
+    """
+    if entry.get("has_conversation"):
+        return "consumer"
+    if entry.get("channel") == "creator":
+        return "creator"
+    return "consumer"
+
+
 def compute_pending(cfg: dict | None = None, account_id: str | None = None) -> list[dict]:
     """预测本次运行会真实发送的名单（与 run_send 通道判定一致）。"""
     cfg = cfg or load_config(account_id)
@@ -1118,7 +1136,7 @@ def compute_pending(cfg: dict | None = None, account_id: str | None = None) -> l
     allow_first = bool(cfg.get("allow_first_message"))
     pending: list[dict] = []
     for e in entries:
-        if e.get("has_conversation"):
+        if _route_send_channel(e) == "consumer":
             pending.append({**e, "send_channel": "consumer"})
         elif allow_first and creator_sent_today < daily_limit:
             pending.append({**e, "send_channel": "creator"})
@@ -1272,7 +1290,7 @@ def run_send(dry_run: bool = False, only_names: list[str] | None = None, account
                             msg = custom_msg
                         else:
                             msg = build_message(messages, last_sent_msg=str(entry.get("last_msg", "")))
-                        if entry.get("has_conversation"):
+                        if _route_send_channel(entry) == "consumer":
                             _send_consumer(page, entry, msg, dry_run, result, aid, tracker=tracker)
                         else:
                             _send_creator(entry, msg, dry_run, result, p, aid)
